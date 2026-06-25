@@ -90,15 +90,16 @@ jobs:
             export MAKEFLAGS="-j$(nproc)"
             export MCFLAGS="-j$(nproc)"
             export CC="ccache gcc"
-
-            echo "=== Modifying PKGBUILD ==="
-            sed -i 's/pkgbase="linux-\$_pkgsuffix"/pkgbase="linux-\$_pkgsuffix-btrfs"/' PKGBUILD
-            sed -i 's/_use_llvm_lto:=none/_use_llvm_lto:=full/' PKGBUILD
-            echo "  -> Successfully modified PKGBUILD options"
             
             # Clone from AUR instead of official repos
             git clone https://aur.archlinux.org/linux-cachyos-bore.git
             cd linux-cachyos-bore
+
+            echo "=== Modifying PKGBUILD ==="
+            sed -i 's/pkgbase="linux-\$_pkgsuffix"/pkgbase="linux-\$_pkgsuffix-btrfs"/' PKGBUILD
+            sed -i 's/_use_llvm_lto:=none/_use_llvm_lto:=full/' PKGBUILD
+            sed -i 's/_processor_opt:=/_processor_opt:=generic/' PKGBUILD
+            echo "  -> Successfully modified PKGBUILD options"
             
             echo "=== Step 4: Modify the CachyOS kernel config file ==="
             sed -i \
