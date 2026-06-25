@@ -1,4 +1,4 @@
-name: Automated CachyOS-Bore Kernel Build
+name: Automated Custom CachyOS-Bore Kernel Build
 
 on:
   schedule:
@@ -49,6 +49,15 @@ jobs:
       with:
         fetch-depth: 0
 
+    - name: Create Swap File (Fixes OOM Error 137)
+      run: |
+        echo "=== Creating 16GB Swap File ==="
+        sudo fallocate -l 16G /swapfile
+        sudo chmod 600 /swapfile
+        sudo mkswap /swapfile
+        sudo swapon /swapfile
+        free -h
+
     - name: Setup Cache for ccache
       uses: actions/cache@v4
       with:
@@ -96,9 +105,9 @@ jobs:
             cd linux-cachyos-bore
 
             echo "=== Modifying PKGBUILD ==="
-            sed -i 's/pkgbase="linux-\$_pkgsuffix"/pkgbase="linux-\$_pkgsuffix-btrfs"/' PKGBUILD
-            sed -i 's/_use_llvm_lto:=none/_use_llvm_lto:=full/' PKGBUILD
-            sed -i 's/_processor_opt:=/_processor_opt:=generic/' PKGBUILD
+            sed -i "s/pkgbase=\"linux-\$_pkgsuffix\"/pkgbase=\"linux-\$_pkgsuffix-btrfs\"/" PKGBUILD
+            sed -i "s/_use_llvm_lto:=none/_use_llvm_lto:=full/" PKGBUILD
+            sed -i "s/_processor_opt:=/_processor_opt:=generic/" PKGBUILD
             echo "  -> Successfully modified PKGBUILD options"
             
             echo "=== Step 4: Modify the CachyOS kernel config file ==="
