@@ -1,0 +1,160 @@
+name: Automated CachyOS-Bore Kernel Build
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Automatically checks every day at midnight UTC
+  workflow_dispatch:     # Allows manual trigger anytime
+
+permissions:
+  contents: write       # Grants permission to save the version state file and create releases
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      latest_tag: ${{ steps.check.outputs.latest_tag }}
+    steps:
+    - name: Checkout Your Repo
+      uses: actions/checkout@v4
+
+    - name: Check AUR API for New Upstream Release
+      id: check
+      run: |
+        # Fetch the latest version string from the official AUR RPC API
+        LATEST_TAG=$(curl -s "https://aur.archlinux.org/rpc/?v=5&type=info&arg=linux-cachyos-bore" | jq -r '.results[0].Version')
+        echo "Latest upstream AUR version: $LATEST_TAG"
+        
+        touch .last_release
+        LOCAL_TAG=$(cat .last_release)
+        echo "Last built local version: '$LOCAL_TAG'"
+        
+        if [ "$LATEST_TAG" = "$LOCAL_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+          echo "Result: Upstream matches local or API error. Skipping build."
+          echo "should_build=false" >> $GITHUB_OUTPUT
+        else
+          echo "Result: New release detected! Proceeding..."
+          echo "should_build=true" >> $GITHUB_OUTPUT
+          echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+        fi
+
+  build-kernel:
+    needs: check-version
+    if: needs.check-version.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Source Code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Cache for ccache
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/.ccache
+        key: ${{ runner.os }}-cachyos-ccache-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-cachyos-ccache-
+
+    - name: Run Build inside Arch Container
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        LATEST_TAG: ${{ needs.check-version.outputs.latest_tag }}
+      run: |
+        # Ensure host cache directories exist and are writable by the container user
+        mkdir -p ${{ github.workspace }}/.ccache
+        chmod -R 777 ${{ github.workspace }}/.ccache
+
+        docker run --rm \
+          -v ${{ github.workspace }}/.ccache:/home/builder/.cache/ccache \
+          -v ${{ github.workspace }}:/workspace \
+          -w /workspace \
+          archlinux:latest bash -c '
+            set -ex
+            
+            echo "=== Step 1: Bootstrap Dependencies ==="
+            pacman -Syu --noconfirm
+            pacman -S --noconfirm git base-devel devtools pacman-contrib ccache sudo github-cli
+            pacman -Scc --noconfirm
+            
+            echo "=== Step 2: Configure Build User ==="
+            useradd -m builder
+            echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+            chown -R builder:builder /home/builder/.cache/ccache
+            chown -R builder:builder /workspace
+            
+            echo "=== Step 3: Clone, Configure, and Build Package ==="
+            sudo -u builder bash << "EOF"
+            set -ex
+            export MAKEFLAGS="-j$(nproc)"
+            export MCFLAGS="-j$(nproc)"
+            export CC="ccache gcc"
+            
+            # Clone from AUR instead of official repos
+            git clone https://aur.archlinux.org/linux-cachyos-bore.git
+            cd linux-cachyos-bore
+            
+            echo "=== Step 4: Modify the CachyOS kernel config file ==="
+            sed -i \
+              -e "s/CONFIG_BLK_DEV_NVME=./CONFIG_BLK_DEV_NVME=y/" \
+              -e "s/CONFIG_BTRFS_FS=./CONFIG_BTRFS_FS=y/" \
+              -e "s/CONFIG_LIBCRC32C=./CONFIG_LIBCRC32C=y/" \
+              -e "s/CONFIG_CRC32=./CONFIG_CRC32=y/" \
+              -e "s/CONFIG_CRYPTO_SHA256=./CONFIG_CRYPTO_SHA256=y/" \
+              -e "s/CONFIG_CRYPTO_BLAKE2B=./CONFIG_CRYPTO_BLAKE2B=y/" \
+              -e "s/CONFIG_ZLIB_INFLATE=./CONFIG_ZLIB_INFLATE=y/" \
+              -e "s/CONFIG_ZLIB_DEFLATE=./CONFIG_ZLIB_DEFLATE=y/" \
+              -e "s/CONFIG_ZSTD_COMPRESS=./CONFIG_ZSTD_COMPRESS=y/" \
+              -e "s/CONFIG_ZSTD_DECOMPRESS=./CONFIG_ZSTD_DECOMPRESS=y/" \
+              config
+            echo "  -> Successfully modified config (Debug Info Intact)"
+            
+            updpkgsums
+            makepkg --skippgpcheck --syncdeps --noconfirm
+        EOF
+          '
+
+    - name: Restore Workspace Ownership
+      run: |
+        sudo chown -R $USER:$USER .
+
+    - name: Upload Compiled Packages as Workflow Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: cachyos-bore-packages
+        path: linux-cachyos-bore/*.pkg.tar.zst
+        if-no-files-found: error
+
+    - name: Save Version State back to Repo
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        echo "${{ needs.check-version.outputs.latest_tag }}" > .last_release
+        git add .last_release
+        git diff --cached --quiet || git commit -m "Automated: Update tracked kernel tag to ${{ needs.check-version.outputs.latest_tag }}"
+        git push
+
+    - name: Create GitHub Release and Upload Packages
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TAG_NAME: ${{ needs.check-version.outputs.latest_tag }}
+      run: |
+        echo "=== Create Base Release Entry ==="
+        gh release create "$TAG_NAME" \
+          --title "CachyOS-Bore Kernel Release $TAG_NAME" \
+          --notes "Automated optimized custom build of the \`linux-cachyos-bore\` kernel from the AUR." || true
+        
+        echo "=== Upload Assets to Release ==="
+        gh release upload "$TAG_NAME" linux-cachyos-bore/*.pkg.tar.zst --clobber
+
+    - name: Log Summary
+      run: |
+        PKGVER=$(grep -E "^pkgver=" linux-cachyos-bore/PKGBUILD | cut -d= -f2)
+        PKGREL=$(grep -E "^pkgrel=" linux-cachyos-bore/PKGBUILD | cut -d= -f2)
+        OFFICIAL_VERSION="${PKGVER}-${PKGREL}"
+
+        echo "## 🚀 CachyOS-Bore Kernel Build Complete" >> $GITHUB_STEP_SUMMARY
+        echo "The workflow finished building and packaging your optimization modifications successfully." >> $GITHUB_STEP_SUMMARY
+        echo "- **Kernel package flavor:** \`linux-cachyos-bore\`" >> $GITHUB_STEP_SUMMARY
+        echo "- **Official AUR Version:** \`$OFFICIAL_VERSION\`" >> $GITHUB_STEP_SUMMARY
