@@ -51,6 +51,9 @@ jobs:
 
     - name: Create Swap File (Fixes OOM Error 137)
       run: |
+        echo "=== Deactivating Existing Swap ==="
+        sudo swapoff -a || true
+        
         echo "=== Creating 16GB Swap File ==="
         sudo fallocate -l 16G /swapfile
         sudo chmod 600 /swapfile
